@@ -1,0 +1,536 @@
+---
+output:
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Identifying cell type-defining genes for translation to flow cytometry
+## Rationale 
+
+Inflammatory immune cells, such as microglia and monocytes, play a significant role in disease progression. Accurately identifying these immune cells is essential for understanding their specific contributions to pathology. Distinguishing microglia, the resident immune cells of the central nervous system, from other infiltrating immune cells like monocytes, is particularly critical, as these cells often assume opposing roles during disease. However, this distinction is challenging due to their tendency to adopt similar phenotypes and transcriptional profiles under pathological conditions.
+
+Single-cell RNA sequencing has emerged as a powerful technique that enables the quantification of thousands of genes at the single-cell level, revolutionizing our understanding of immune cell heterogeneity. This approach allows for the precise identification of genes that distinguish specific cell types and immune states. Despite these advancements, single-cell RNA sequencing is costly, requires specialized training, and involves complex multi-omics data analysis. Therefore, there is a need to develop a method that identifies key cell type-defining genes that can be translated into more cost-effective and widely accessible techniques, such as conventional flow cytometry.
+
+The aim of this project is to identify cell type-defining genes from single-cell RNA sequencing data that can be applied to flow cytometry. Highly variable genes within the dataset will be identified to reduce the dimensionality of the data, enabling downstream clustering into distinct cell types. Cell type or subset identity will be predicted using a random forest classifier based on the features essential for classification. The key genes defining each cell type will be identified by their importance, as determined by the random forest analysis, and visualized in a flow cytometry-like plot to simulate a gating strategy commonly used in this technique.
+
+#### Hypotheses
+
+1.	Dimensionality reduction will capture patterns in the expression of highly variable genes that distinguish between (a) cell types (e.g., monocytes and microglia) and (b) cell subsets.
+2. A small number of genes can accurately distinguish these cell types (e.g., microglia vs monocytes) or cell subsets by their features (expression of variable genes).  
+
+
+# Methods 
+
+### Dataset selection
+The dataset used in this report is a single cell RNA-sequencing dataset of immune cells. These immune cells are derived from spinal cords of mice in one of two conditions: (1) experimental autoimmune encephalomyelitis (EAE, an animal model of Multiple Sclerosis) or (2) phosphate-buffered serum (PBS)-injected controls. This dataset was downloaded from the Gene Expression Omnibus, a public data repository hosting gene expression data (dataset GSE#: GSE146113).  
+
+### Pre-processing 
+
+##### Data cleaning
+Data was converted into a S4 Seurat object with the Seurat package. All subsequent analyses were performed on the Seurat object. Low quality cells were filtered out of the dataset prior to analysis using the Seurat ‘subset’ function. Low quality cells were defined as cells with greater than five percent mitochondrial gene expression and less than 250 reads per cell. Doublets were defined as cells with greater than 2500 genes/cell and were excluded from analysis.
+
+##### Normalisation
+Gene expression measurements for each cell was log normalized by the total expression at a scale factor of 1000 using the Seurat function ‘Normalize Data’. 
+
+### Dimensional Reduction
+
+##### Defining variable features 
+Variables genes were identified for subsequent dimensional reduction using the ‘FindVariableGenes’ Seurat function, which selects genes displaying a variance/mean ratio above 0.1. The average expression and dispersion was then calculated for each gene, placed into a bin and given a z-score for dispersion in each bin. 
+
+##### Data scaling and centring 
+Prior to dimensional reduction, gene expression was centered and scaled using the Seurat function ‘ScaleData’. This function centers the expression of each gene by subtracting the average expression of the gene for each cell. Scaling divides the centered gene expression levels by the standard deviation.
+
+##### Principal component analysis 
+Principal components (PCs) were calculated using the ‘RunPCA’ Seurat function. Each PC represents a “metagene” that reduces information across a correlated gene set (identified as the top variable genes). PC selection for downstream clustering was defined by elbow plots. The ‘elbow’ was defined by taking the larger value of the point where the (1) principal components cumulatively contribute to 90% of the standard deviation and (2) percent change in variation between the consecutive PCs is less than 0.1%. Based on these metrics, 11 PCs were used for downstream clustering. 
+
+### Cell type classification
+
+##### Clustering
+Cells were grouped in distinct cell clusters using the ‘FindClusters’ function in Seurat with the number of PCs defined above. Cells were grouped using K-nearest neigbhour clustering, which draws edges between cells with similar expression patterns. 
+
+##### Benchmarking 
+Prior to analysis, scaled and centred data was randomized and split into training (80% of data) and testing (20% of data) subsets. Variable importances based on random forests were calculated for each gene by the 'Ranger' package, which fits a classification tree using the implementation provided by the partykit R package. The function FindAllMarkers from the 'scTree' package  was used to define importance p-values for each gene in defining each cell susbet or cell type.
+
+#### Random forest classifier 
+A classifier was trained by selecting the top three genes per target (defined by their variable importances). These features were then used to train a prediction model on the training set, and the predictions were then applied to the testing set. 
+
+#### Validation
+Model performance was evaluated by the caret package. The random forest model (trained on 'training' set) was applied to the 'testing' set. Predictions were then compared with the true cell type/cell subset identity. The ConfusionMatrix function was used to calculate a cross-tabulation of observed and predicted cell type/cell subset identities and the relevant statistics.The function MultiClassSummary was used to calculate overall measures of performance (e.g., overall accuracy and the Kappa statistic). 
+
+#### Flow-style plots 
+Faceted scatter plots were created using the top three genes (selected by highest importance) for classifying each cell type (either 'Microglia' or 'Monocytes') using the function 'plot_flowstyle' by the sctree package. These plots were used to simulate flow cytometry-like plots from the identified important features. 
+
+# Results
+
+
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+
+library(Seurat)
+library(ggplot2)
+library(GoodmanKruskal)
+library(caret)
+library(ltm)
+library(arm)
+library(randomForest)
+library(dplyr)
+library(scales)
+library(ROCR)
+library(tidyverse)
+library(caTools)
+library(sctree)
+library(scclusteval)
+library(ROSE)
+library(grid)
+library(gridBase)
+library(gridExtra)
+library(scater)
+library(ggpubr)
+library(caret)
+library(vip)
+library(tidymodels)
+library(kableExtra)
+library(tidyverse)
+library(flextable)
+
+```
+
+### Pre-processing 
+
+#### Data cleaning
+
+The dataset was generated by Mendiola et al.2020 to study the activation profiles of microglia and monocytes in EAE, an animal model of Multiple Sclerosis. The dataset consists of spinal cord tissue from two experimental conditions (EAE and healthy control). The data was acquired by quantifying single-cell gene expression by single-cell RNA-sequencing (10x Genomics) from spinal cord tissue by quantifying gene expression in each cell by single-cell RNA-sequencing (10x Genomics). 
+
+The acquired dataset contains measurements for 9079 cells and 16681 genes. To ensure technical noise does not affect downstream clustering of these cells, low quality cells need to be removed. Two common measures of cell quality are the number of expressed features (nFeature_RNA) and the total number of counts across all gene (nCount_RNA). Cells with very few expressed genes or counts are likely to be of low quality as the RNA has not been efficiently captured during library preparation. Another measure of quality is the percentage of reads that are mitochondrial genes (percent.mt). Dying cells express a high percentage of mitochondrial genes likely due to apoptotic processes, and need to be excluded from analysis. The distribution of these three metrics across each sample are shown in Figure 1A-C. 
+
+Low quality cells were defined as cells with greater than five percent mitochondrial gene expression and less than 250 reads per cell. Doublets were defined as cells with greater than 2500 genes/cell and were excluded from analysis. After filtering data, 6859 cells remained that met the quality control requirements. Data was additionally log-normalized. 
+
+As the total number of reads in a cell correlates strongly with the number of expressed genes (Figure 1D), a threshold for lowly expressed genes was not included in data filtering as it was likely accounted for by the read threshold. After quality control and accounting for technical noise, 6859 cells were considered for analysis.
+
+
+```{r load, echo=FALSE, include=FALSE}
+set.seed(1)
+load("/Users/clairewishart/Desktop/Data report/Report/data/data.RData")
+```
+
+
+````{r warning=FALSE, crop=NULL, echo=TRUE, out.width = '100%',fig.height = 8, fig.width = 12, fig.cap="\\label{fig:figs} Figure 1. Quality control metrics per sample. Shown is the total number counts per cell (nCount_RNA, A), gene expression per cell (nFeature _RNA, B) and percent mitochondrial gene expression (percent.mt, C). (D) Correlation between total number of counts and number of expressed genes per cell. EAE, Experimental Autoimmune Encephalomyelitis."}
+
+par(mfrow=c(2,2))
+plot1 <- VlnPlot(data, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"),
+                   ncol     = 3,
+                   pt.size  = 0.25)
+
+plot1 <- VlnPlot(data, features = "nCount_RNA", pt.size = 0.25) + labs(
+       title = "A.  Counts per cell") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+
+plot2 <- VlnPlot(data, features = "nFeature_RNA", pt.size = 0.25) + labs(
+       title = "B.  Genes expressed per cell") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+
+plot3 <- VlnPlot(data, features = "percent.mt", pt.size = 0.25) + labs(
+       title = "C.  Percent mitochondrial gene expression") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+
+plot4 <- FeatureScatter(data, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + labs(
+       title = "D.") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+
+grid.arrange(plot1, plot2, plot3, plot4, layout_matrix = rbind(c(1,2,3),
+                                                              c(4,NA,NA)))
+
+````
+
+```{r subset}
+data <- data %>%
+      subset(
+        nFeature_RNA > 250 &   # Remove cells with < 250 detected genes
+          nFeature_RNA < 2500 &  # Remove cells with > 2500 detected genes (could be doublets)
+          percent.mt < 5     # Remove cells with > 5% mitochondrial read
+      )
+
+ncol(data)
+
+```
+
+### Dimensionality Reduction
+
+#### Defining variable features 
+
+Prior to characterizing highly variable genes, the data was log normalized. Highly variable genes are identified to focus on cells that drive heterogeneity across the population of cells. This requires calculating the variance in expression of each gene across the dataset. 
+
+````{r norm}
+
+data.norm <- NormalizeData(data, normalization.method = "LogNormalize", scale.factor = 10000)
+all.genes <- rownames(data.norm)
+data.norm <- FindVariableFeatures(data.norm, selection.method = "mean.var.plot")
+
+length(VariableFeatures(data.norm))
+
+````
+
+Highly variable genes are defined as genes that display a mean to variance ratio greater than 0.1 and a dispersion greater than one. This identified 688 highly variable genes (Figure 2), which are ranked to focus on genes with larger biological variability. 
+
+````{r, warning=FALSE, fig.width = 15, fig.height = 4, out.height = "300px", fig.cap="\\label{fig:figs} Figure 2. Dispersion values for each gene, plotted against log-transformed average expression. Highly variable genes are annotated."}
+
+top10 <- head(VariableFeatures(data.norm), 10)
+plot1 <- VariableFeaturePlot(data.norm)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE, xnudge = 0, ynudge = 0)
+plot1 + plot2 
+
+````
+
+
+### Principal component analysis 
+
+#### PC selection
+
+Next, dimensionality reduction is performed on the high variable genes to determine if there is any substructure in the dataset. Prior to performing dimensionality reduction, the dataset was scaled and centred. 
+
+To overcome technical noise in the expression of a single gene, clusters (cell subsets) are classified based on their PCA scores that have been derived from their common expression of a set of highly variable genes. Thus, each principal component (PC) represents a combination of information across a correlated gene set. This identified 50 PCs.
+
+````{r pca}
+
+data.pca <- ScaleData(data.norm, features = all.genes, do.center = T, do.scale = T)
+data.pca <- RunPCA(data.pca, features = VariableFeatures(object = data.norm))
+print(data.pca[["pca"]], nfeatures = 5)
+
+````
+
+The number of PCs will be used to inform downstream clustering. Thus, it is crucial to determine the true dimensionality for the dataset. It is evident from Figure 3 that the majority of variation is explained by PC1 to ~PC10. The optimal number of PCs was determined as the last point where change in percent variation is more than 0.1%. This identified the optimal dimensionality of the dataset as 11 PCs. 
+
+
+```{r error=TRUE, fig.height = 4, fig.width = 6, fig.cap="\\label{fig:figs} Figure 3. Standard deviation of each principal component (PC)."}
+
+ElbowPlot(data.pca)
+
+```
+
+```{r, error=TRUE, fig.cap="\\label{fig:figs} Figure 4. Percent of variance explained by each principal component."}
+
+mat <- Seurat::GetAssayData(data.pca, assay = "RNA", slot = "scale.data")
+pca <- data.pca[["pca"]]
+total_variance <- sum(matrixStats::rowVars(mat))
+eigValues = (pca@stdev)^2  ## EigenValues
+varExplained = (eigValues / total_variance)* 100
+
+plot(varExplained, ylab="Percent of variance", xlab="Principal Component")
+
+```
+
+```{r, error=TRUE}
+
+pct <- data.pca@reductions$pca@stdev/sum(data.pca@reductions$pca@stdev) * 100
+cum <- cumsum(pct)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cum > 90 & varExplained < 5)[1]
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct)-1] - pct[2:length(pct)]) > 0.1),  decreasing = T)[1] + 1 # last point where change of % of variation is more than 0.1%.
+
+# Minimum of the two calculation
+pcs <- min(co1, co2) 
+pcs
+
+```
+
+#### Clustering by optimal number of PCs
+
+Cells separate into clear clusters in the PCA plot (Figure 5), corresponding to distinct disease states (healthy versus control conditions). This is consistent with the presence of new cell populations that infiltrate the spinal cord in response to the EAE disease state.
+
+To determine the cellular substructure of the dataset, K-means clustering is performed on the dataset (dimensionality = PCs 1:11, resolution = 0.5). This identified 14 related cell clusters, as shown by Figure 5. 
+
+
+```{r warning=FALSE, crop=NULL, message=FALSE, fig.height = 3, fig.width = 9, fig.cap="\\label{fig:figs}Figure 5. Linear dimension reduction and k-means clustering identifies 14 distinct cell clusters. (A) Original sample membership of each cell. (B) Assigned cluster identity by k-means clustering."}
+
+data.pca <- FindNeighbors(data.pca, reduction = "pca", dims = 1:pcs)
+data.pca <- FindClusters(data.pca, pc.use = 1:pcs)
+DimPlot(data.pca, reduction = "pca")
+data.pca <- StashIdent(data.pca, 
+                        save.name = "cluster.id") 
+
+plot1 <- DimPlot(data.pca, group.by = "orig.ident") + labs(title = "A. Original sample membership") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+plot2 <- DimPlot(data.pca, group.by = "cluster.id",  label = T) + labs(title = "B.  Assigned cluster ID") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+
+plot1 + plot2
+
+```
+
+#### Cluster annotation
+
+To assign cell type identity to each cluster, expression of the gene P2ry12, a known microglia-specific gene, was used to identify microglia. Expression of Vim, a known monocyte-specific gene, was used to identify monocyte clusters. This identified eight monocyte subclusters and five microglia subclusters. Microglia were best explained by PC1, whereas monocytes were best explained by PC2 (Figure 6). 
+
+```{r, crop=NULL, warning=FALSE, message=FALSE, fig.height=6, fig.width=10, fig.cap="\\label{fig:figs} Figure 6. Expression of genes (A) P2ry12 and (B) Vim used for (C) cell type classification. (D) Clusters correspond to eight monocytes clusters and five microglia subsets."}
+
+Idents(data.pca) <- "cluster.id"
+data.pca <- RenameIdents(data.pca,
+                            "0" = "Monocytes",
+                            "1" = "Monocytes",
+                            "2" = "Microglia",
+                            "3" = "Monocytes", 
+                            "4" = "Microglia",
+                            "5" = "Monocytes",
+                            "6" = "Microglia",
+                            "7" = "Microglia",
+                            "8" = "Monocytes", 
+                          "9" = "Monocytes", 
+                          "10" = "Monocytes", 
+                          "11" = "Microglia", 
+                          "12" = "Monocytes", 
+                          "13" = "Monocytes")
+data.pca <- StashIdent(data.pca, save.name = "Cell_type")
+
+Idents(data.pca) <- "cluster.id"
+data.pca <- RenameIdents(data.pca,
+                            "0" = "Monocyte1",
+                            "1" = "Monocyte2",
+                            "2" = "Microglia1",
+                            "3" = "Monocyte3", 
+                            "4" = "Microglia2",
+                            "5" = "Monocyte4",
+                            "6" = "Microglia3",
+                            "7" = "Microglia4",
+                            "8" = "Monocyte5", 
+                          "9" = "Monocyte6", 
+                          "10" = "Monocytes", 
+                          "11" = "Microglia5", 
+                          "12" = "Monocyte7", 
+                          "13" = "Monocyte8")
+data.pca <- StashIdent(data.pca, save.name = "Cell_subset")
+
+plots <- list()
+p1 <- FeaturePlot(data.pca, feature = "P2ry12") + labs(
+       title = "A.  P2ry12") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+p2 <- FeaturePlot(data.pca, feature = "Vim") + labs(
+       title = "B.  Vim") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+
+p3 <- DimPlot(data.pca, group.by = "Cell_type") + labs(
+       title = "C.  Cell type") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+
+p4 <- DimPlot(data.pca, group.by = "Cell_subset") + labs(
+       title = "D.  Cell subset") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+
+gridExtra::grid.arrange(p1, p2, p3, p4, layout_matrix = rbind(c(1,3),
+                                                              c(2,4)))
+
+
+```
+
+#### Random Forest 
+
+##### Phylogenetic decision tree
+
+After identifying two cell types and 14 cell subsets, a phylogenetic decision tree is visualized to determine if identity (cell subset or cell type) can be predicted by a select number of genes (Figure 7). From the decision tree, clear separation is evident between the two cell types, which are further separated into distinct cell subsets (Microglia1-5, Monocytes1-8), suggesting these both cell subset and cell type may be predicted by a random forest classifier.
+
+```{r, fig.cap="\\label{fig:figs} Figure 7. Phylogenetic decision tree depicting classification of each cluster identity."}
+
+Idents(data.pca) <- "Cell_subset"
+tree <- BuildClusterTree(data.pca, dims = 1:pcs)
+PlotClusterTree(tree)
+summary(tree@tools$BuildClusterTree)
+
+```
+
+
+### Predicting cell subset identity
+
+#### Defining important features
+
+To determine genes that may be used to classify each cell subset, variable importance for each gene in classifying either (1) a particular cell subset or (2) a particular cell type was calculated on the training dataset. The top three genes with highest variable importance for each target are used as features (Table 1). 
+
+```{r marker}
+
+# Identify markers per cell subset
+Idents(data.pca) <- "Cell_subset"
+markers <- sctree::FindAllMarkers(
+        data.pca,
+        features = rownames(data.pca@assays$RNA@data),
+        test.use = "RangerDE")
+
+# Identify markers per cell type 
+Idents(data.pca) <- "Cell_type"
+cell.type.markers <- sctree::FindAllMarkers(
+        data.pca,
+        features = rownames(data.pca@assays$RNA@data),
+        test.use = "RangerDE")
+
+set.seed(1)
+Idents(data.pca) <- "cluster.id"
+train1 <- RandomSubsetData(data.pca, 0.8)
+test1 <- RandomSubsetData(data.pca, 0.2)
+
+Idents(data.pca) <- "Cell_type"
+train2 <- RandomSubsetData(data.pca, 0.8)
+test2 <- RandomSubsetData(data.pca, 0.2)
+
+cell.plot.markers <- do.call(rbind, lapply(split(cell.type.markers, cell.type.markers$cluster), head, 3))
+plot.markers <- do.call(rbind, lapply(split(markers, markers$cluster), head, 3))
+
+top_cell_markers <- cell.plot.markers$gene
+top_markers <- plot.markers$gene
+top_markers <- unique(top_markers) # remove duplicates
+
+tree_fit.cell.type <- fit_ctree(train2, 
+                      genes_use = top_cell_markers, 
+                      cluster = "ALL")
+
+tree_fit <- fit_ctree(train1, 
+                      genes_use = top_markers, 
+                      cluster = "ALL")
+
+cell.plot.markers <- cell.plot.markers %>% rownames_to_column()
+cell.marker.table <- cell.plot.markers[, c(4, 2)] %>% mutate_if(is.numeric, ~round(., 1))
+plot.markers <- plot.markers %>% rownames_to_column()
+marker.table <- plot.markers[, c(9, 4, 2)] %>% mutate_if(is.numeric, ~round(., 1))
+colnames(marker.table) <- c("Cell subset (cluster ID)", "Gene", "Importance")
+
+ft <- marker.table %>% flextable()
+ft <- autofit(ft)
+ft
+```
+
+#### Model validation
+
+Next, features shown in Table 1 were used to train a random forest model to predict cell subset identity (n identities = 14).The performance of this model was assessed by evaluating accuracy and precision. Overall, this model was 63.4% accurate (Kappa = 0.594) in predicting cell subset identity. Additional measurements of model performance are shown in Table 2. Several cell subsets were frequently misclassified. As shown by the confusion matrix (Figure 8A), cluster 7 (Microglia4) and cluster 2 (Microglia1) were the most commonly misclassified cell subset (0% correctly classified), followed by cluster 3 (Monocyte3, 52.42% correct) and cluster 13 (Monocyte8, 60.08% correct). This is likely due to poor separation of these clusters, as shown on the PCA plot (Figure 8C), suggestion co-expression in the variable genes across various cell subsets. 
+
+```{r, crop=NULL, fig.width = 10, fig.height = 6, fig.cap="\\label{fig:figs} Figure 8. (A) Real identities of subsets are based on top gene expression. (B) A random forest model was used to predict cell subset identity the top three genes per cell subset. TRUE denonates correct classification, whereas FALSE denotes incorrect classification. (C) Random forest confusion matrix depicting the predicted cell subset versus the actual cell susbset identity."}
+
+testset <- as.data.frame(test1, top_markers, fix_names = FALSE)
+predicted <- predict(tree_fit, testset)
+gating_genes <- names(partykit::varimp(tree_fit[[1]]))
+confusion_matrix <- table(data.frame(predicted = predicted,
+                                         cluster = testset$ident))
+test1[["predicted"]] <- predicted
+test1[["correctly_classified"]] <- predicted == Idents(test1)
+confusion_tbl <- table(
+    Predicted = predicted, 
+    Actual = test1@meta.data$cluster.id)
+Actual = test1@meta.data$cluster.id
+
+plot3 <- DimPlot(test1, group.by = "Cell_subset", label = F) + labs(
+       title = "C.  Real subset identity") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+plot2 <- DimPlot(test1, group.by = "correctly_classified", label = F) + labs(
+       title = "B.  Accuracy of predicted cell type identity") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+plot1 <- sctree::autoplot(as.frequency.matrix(confusion_tbl), show_number = TRUE) + labs(
+       title = "A. Random forest confusion matrix") + theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12, face="bold")) 
+
+grid.arrange(plot1, plot2, plot3, layout_matrix = rbind(c(1,1,1,1,2,2,2),
+                                               c(1,1,1,1,3,3,3)))
+
+```
+
+
+```{r cell subset}
+
+a <- test1@meta.data[, c(10, 13)] 
+colnames(a) <- c('obs', 'pred')
+
+stat.t <- as.data.frame(multiClassSummary(a, lev = levels(a$obs))) %>% rownames_to_column(var = "Statistic") %>% mutate_if(is.numeric, ~round(., 3))
+colnames(stat.t) <- c('Statistic', 'Value')
+
+stat.t <- as.data.frame(multiClassSummary(a, lev = levels(a$obs))) %>% rownames_to_column(var = "Statistic") %>% mutate_if(is.numeric, ~round(., 3))
+colnames(stat.t) <- c('Statistic', 'Value')
+
+
+ft <- stat.t %>% flextable()
+ft <- autofit(ft)
+ft
+
+
+```
+
+### Predicting cell type
+
+#### Defining important features
+
+As the performance of the model in predicting cell subset was variable, a model was then created to classify the two cell types rather than cell susbet. Features important in defining cell types were defined using Ranger (see methods). This identified six features that were important in classifying each cell type (Table 3). 
+
+```{r}
+
+
+cell.marker.table <- cell.plot.markers[, c(9, 4, 2)] %>% mutate_if(is.numeric, ~round(., 1)) 
+colnames(cell.marker.table) <- c("Cell type", "Gene", "Importance") 
+
+
+
+ft <- cell.marker.table %>% flextable()
+ft <- autofit(ft)
+ft
+
+```
+#### Model validation
+
+The features shown in Table 3 were then used to train a random forest model and predict cell type identity. As above, the dataset was split into a training (80% of cells) and testing (20% of cells) sets. After training, the performance of the model in predicting cell type (either 'Microglia' or 'Monocyte') was assessed (Figure 9, Table 4). As shown in Figure 11, the model predicts cell type 99.7% accuracy (Kappa = 0.994).
+
+```{r echo=FALSE, fig.width = 10, fig.height = 6, fig.cap="\\label{fig:figs} Figure 9. (A) Real identities of cell type are based on top gene expression. (B) Random forest were used to classify cells by the top six genes. TRUE denonates correct classification, whereas FALSE denotes incorrect classification. (C) Confusion matrix depicting the assigned classification of each cell type versus the actual cell type identity.", crop = NULL}
+
+testset2 <- as.data.frame(test2, top_cell_markers, fix_names = FALSE)
+predicted <- predict(tree_fit.cell.type, testset2)
+gating_genes <- names(partykit::varimp(tree_fit.cell.type [[1]]))
+confusion_matrix <- table(data.frame(predicted = predicted,
+                                         cluster = testset2$ident))
+
+test2[["predicted"]] <- predicted
+test2[["correctly_classified"]] <- predicted == Idents(test2)
+confusion_tbl <- table(
+    Predicted = predicted, 
+    Actual = Idents(test2))
+
+table <- as.frequency.matrix(confusion_tbl)
+
+plot3 <- DimPlot(test2, group.by = "Cell_type", label = F) + labs(
+       title = "C.  Real cell type identity") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+plot2 <- DimPlot(test2, group.by = "correctly_classified", label = F) + labs(
+       title = "B.  Accuracy of predicted cell type identity") +
+   theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12)) 
+plot1 <-sctree::autoplot(table, show_number = TRUE) + labs(
+       title = "A. Random forest confusion matrix", 
+       caption = "test") + theme(plot.title = element_text(hjust = 0, vjust=2.12, size=12, face="bold")) 
+
+plot <- grid.arrange(plot1, plot2, plot3, 
+                     layout_matrix = rbind(c(1,1,2,2),
+                                          c(1,1,3,3)))
+
+
+
+```
+
+```{r cell type}
+
+a <- test2@meta.data[, c(11, 13)] 
+colnames(a) <- c('obs', 'pred')
+
+stat.t <- as.data.frame(multiClassSummary(a, lev = levels(a$obs))) %>% rownames_to_column(var = "Statistic") %>% mutate_if(is.numeric, ~round(., 3))
+colnames(stat.t) <- c('Statistic', 'Value')
+
+ft <- stat.t %>% flextable()
+ft <- autofit(ft)
+ft
+
+```
+
+#### Application to flow cytometry 
+
+The high accuracy of this model indicates combinations of these genes may be used to identify these cells by flow cytometry. Simulated flow cytometry plots using the top six genes for classifying the two cell types are shown in Figure 10, demonstrating clear separation between these two cell types. 
+
+```{r, message=FALSE, warning=FALSE, fig.cap="\\label{fig:figs} Figure 10. Faceted scatter plots simulating a flow cytometry gating strategy. Each plot shows the separation of monocytes (red) and microglia (blue) by each combination of features. Included features are defined as the top six genes, as defined by variable importances."}
+
+Idents(data.pca) <- "Cell_type"
+plot_flowstyle(data.pca, top_cell_markers, classif_col = "ident", warn = FALSE)
+
+```
+
+
+In conclusion, six out of 16681 genes can accurately predict cell type identity. These genes may be translated to other single-cell applications, such as flow cytometry as demonstrated by the simulated gating strategy. Predicting cell subset identity also performed well, however, this was variable between cell types and required a larger number of genes, therefore increasing the complexity of the classification and making it less likely to be translatable to flow cytometry.
