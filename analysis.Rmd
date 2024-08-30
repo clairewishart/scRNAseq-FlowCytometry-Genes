@@ -94,7 +94,7 @@ library(tidymodels)
 library(kableExtra)
 library(tidyverse)
 library(flextable)
-
+library(here)
 ```
 
 ### Pre-processing 
@@ -111,8 +111,13 @@ As the total number of reads in a cell correlates strongly with the number of ex
 
 
 ```{r load, echo=FALSE, include=FALSE}
+
+# Set seed for reproducibility
 set.seed(1)
-load("/data/data.RData")
+
+# Load data using a relative path
+load(here("data", "data.RData"))
+
 ```
 
 
