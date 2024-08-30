@@ -112,7 +112,7 @@ As the total number of reads in a cell correlates strongly with the number of ex
 
 ```{r load, echo=FALSE, include=FALSE}
 set.seed(1)
-load("/Users/clairewishart/Desktop/Data report/Report/data/data.RData")
+load("/data/data.RData")
 ```
 
 
