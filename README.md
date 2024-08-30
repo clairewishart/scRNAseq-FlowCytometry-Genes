@@ -15,12 +15,19 @@ To run the analysis, you will need the following software and R packages install
 ### Required R Packages:
 
 ```R
+
 install.packages(c(
   "Seurat", "ggplot2", "GoodmanKruskal", "caret", 
   "ltm", "arm", "randomForest", "dplyr", 
   "scales", "ROCR", "tidyverse", "caTools", 
-  "sctree", "scclusteval", "ROSE"
+  "ROSE", "devtools", "grid", "gridBase", 
+  "gridExtra", "ggpubr", "vip", "tidymodels", 
+  "kableExtra", "flextable"
 ))
+
+remotes::install_github("jspaezp/sctree")
+devtools::install_github("crazyhottommy/scclusteval")
+
 ```
 
 ## Project Structure
@@ -31,7 +38,7 @@ The project directory should be structured as follows:
 project_root/
 │
 ├── data/                    # Directory containing the dataset
-│   └── data.RData           # The single-cell RNA-seq dataset file
+│   └── data.RData           # Sample of single-cell RNA-seq dataset file
 │
 ├── README.md                # This README file
 └── analysis.Rmd             # The main R Markdown file containing the code and analysis
@@ -39,7 +46,9 @@ project_root/
 
 ### Data
 
-The dataset used in this project is a single-cell RNA-sequencing dataset downloaded from the Gene Expression Omnibus (GEO) under accession number **GSE146113**. It has been pre-processed into a Seurat object and it is stored in the `data/` directory as `data.RData`.
+The dataset used in this project is a single-cell RNA-sequencing dataset downloaded from the Gene Expression Omnibus (GEO) under accession number **GSE146113**. It has been pre-processed into a Seurat object and underwent pre-processing, normalisation, and clustering to isolate the cell types of interest (microglia and monocytes) for this analysis. This data was exported as a seurat object. For reproducibility, a sample is provided in the `data/` directory as `data.RData`. 
+
+If you require access to the full dataset or have any questions, please email claire.wishart@sydney.edu.au. 
 
 ## Running the Analysis
 
